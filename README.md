@@ -1,54 +1,75 @@
-# Twitter Zapier Post (OAuth 1.0a)
+# Twitter Zapier Post
 
-This repository contains a JavaScript snippet for use in a **"Code by Zapier"** step to post tweets via the Twitter (X) API v2.
+This repository contains tools to post tweets via the Twitter (X) API v2 using "Code by Zapier".
 
-## 1. Get Your Twitter API Credentials
+## 1. OAuth 2.0 Token Acquisition Tool (FastAPI)
 
-To post tweets, you need **OAuth 1.0a User Context** credentials. Follow these steps:
+Since posting tweets requires **User Context**, you can use the included FastAPI server to perform the OAuth 2.0 PKCE flow and get a valid `access_token`.
+
+### A. Setup Twitter Developer Portal
+1. Go to your App's **User authentication settings**.
+2. Enable **OAuth 2.0**.
+3. Set **App Type** to **Web App**.
+4. Set **Callback URI** to `https://<your-tunnel-subdomain>.trycloudflare.com/callback`.
+5. Copy your **Client ID** and **Client Secret**.
+
+### B. Run the Auth Server
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Run the server with your credentials:
+   ```bash
+   export TWITTER_CLIENT_ID="your_client_id"
+   export TWITTER_CLIENT_SECRET="your_client_secret"
+   export TWITTER_REDIRECT_URI="https://<your-tunnel-subdomain>.trycloudflare.com/callback"
+   python auth_server.py
+   ```
+3. Start a Cloudflare Tunnel (in another terminal):
+   ```bash
+   cloudflared tunnel --url http://localhost:8000
+   ```
+4. Visit the URL provided by Cloudflare. It will redirect you to Twitter to authorize.
+5. After authorization, the server will display your `access_token`.
+
+---
+
+## 2. Setup in Zapier
 
 ### A. Set Up Your App Permissions
 1. Go to the [Twitter Developer Portal](https://developer.x.com/en/portal/dashboard).
 2. Select your Project and then your App.
 3. Click on the **Settings** (gear icon) for your app.
 4. Under **User authentication settings**, click **Edit**:
-   - Enable **OAuth 1.0a**.
+   - Enable **OAuth 1.0a** (for permanent tokens) OR **OAuth 2.0** (for the FastAPI tool).
    - Set **App permissions** to **Read and Write**.
    - Under **Type of App**, select **Web App, Android, or iOS**.
-   - Set a **Callback URI / Redirect URL** (e.g., `http://localhost`).
+   - Set a **Callback URI / Redirect URL** (Must match your tunnel URL).
    - Set a **Website URL** (e.g., your personal site).
 5. Click **Save**.
 
-### B. Generate Keys and Tokens
-1. Go to the **Keys and tokens** tab of your app.
-2. Under **Consumer Keys**, generate (or regenerate) your **API Key** and **API Key Secret**. (In Zapier, these are `consumer_key` and `consumer_secret`).
-3. Under **Authentication Tokens**, find **Access Token and Secret**.
-4. Click **Generate** (or Regenerate).
-   - *Note: You must do this AFTER setting permissions to "Read and Write". If you did it before, regenerate them now.*
-5. Copy the **Access Token** and **Access Token Secret**.
+### B. Configuration for "Code by Zapier"
+In your Zapier Code step, add the following keys to **Input Data**:
 
----
-
-## 2. Setup in Zapier
-
-1. Create a new Zap and add a **"Code by Zapier"** action.
-2. Select **Run JavaScript**.
-3. In the **Input Data** section, add the following 5 keys exactly as shown:
-
-| Key | Value (Map from previous steps or paste) |
+#### For OAuth 1.0a (Permanent Token):
+| Key | Value |
 | :--- | :--- |
-| `consumer_key` | Your Twitter API Key |
-| `consumer_secret` | Your Twitter API Key Secret |
-| `access_token` | Your Twitter Access Token |
-| `access_token_secret` | Your Twitter Access Token Secret |
-| `tweet_text` | The content of the tweet you want to post |
+| `consumer_key` | API Key |
+| `consumer_secret` | API Key Secret |
+| `access_token` | User Access Token |
+| `access_token_secret` | User Access Token Secret |
+| `tweet_text` | Tweet content |
 
-4. In the **Code** section, paste the contents of `zapier_twitter_post.js` from this repository.
-5. Test the action.
+#### For OAuth 2.0 (Bearer Token from FastAPI Tool):
+| Key | Value |
+| :--- | :--- |
+| `bearer_token` | `access_token` from FastAPI |
+| `tweet_text` | Tweet content |
 
 ---
 
 ## Troubleshooting
 
-- **403 Forbidden:** Ensure your App permissions are set to "Read and Write" and that you regenerated your Access Token *after* changing that setting.
-- **401 Unauthorized:** Check that all 4 keys (Consumer Key/Secret and Access Token/Secret) are copied correctly and have no trailing spaces.
-- **Duplicate Tweet:** Twitter API v2 will return an error if you try to post the exact same text twice in a short period.
+- **403 Forbidden:** Ensure your App permissions are set to "Read and Write".
+- **401 Unauthorized:** Check that your tokens/keys are correct and the signature matches.
+- **Duplicate Tweet:** Twitter prevents posting the exact same text twice in a row.
