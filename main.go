@@ -25,10 +25,15 @@ import (
 	"github.com/mmcdole/gofeed"
 )
 
-const (
+var (
 	twitterAPIV2    = "https://api.twitter.com/2/tweets"
 	twitterTokenURL = "https://api.twitter.com/2/oauth2/token"
-	twitterAuthURL  = "https://twitter.com/i/oauth2/authorize"
+	httpClient      = &http.Client{Timeout: 30 * time.Second}
+	tokenStateFile  = ".twitter_token.json"
+)
+
+const (
+	twitterAuthURL = "https://twitter.com/i/oauth2/authorize"
 )
 
 type tweetResponse struct {
@@ -42,6 +47,12 @@ type feedEntry struct {
 	Title     string
 	Link      string
 	Published time.Time
+}
+
+type tokenState struct {
+	AccessToken  string    `json:"access_token"`
+	RefreshToken string    `json:"refresh_token"`
+	ExpiresAt    time.Time `json:"expires_at"`
 }
 
 func main() {
@@ -116,17 +127,52 @@ func cmdPost(args []string) {
 		return
 	}
 
+	ts, err := loadTokenState()
+	if err == nil {
+		bearerToken, err := ensureValidToken(ts)
+		if err != nil {
+			log.Fatalf("Token refresh failed: %v. Run 'twitter-poster get-token' to re-authenticate.", err)
+		}
+		posted := 0
+		for _, e := range newEntries {
+			text := formatTweet(*template, e)
+			resp, postErr := postTweetOAuth2(bearerToken, text)
+			if postErr != nil {
+				if isUnauthorized(postErr) {
+					var refreshErr error
+					bearerToken, refreshErr = refreshAccessToken(ts)
+					if refreshErr != nil {
+						log.Printf("Failed to refresh token: %v", refreshErr)
+						break
+					}
+					resp, postErr = postTweetOAuth2(bearerToken, text)
+				}
+				if postErr != nil {
+					log.Printf("Failed to post tweet: %v", postErr)
+					break
+				}
+			}
+			log.Printf("Posted: %q (ID: %s)", resp.Data.Text, resp.Data.ID)
+			if err := writeLastTimestamp(*timestampFile, e.Published); err != nil {
+				log.Printf("Warning: could not save timestamp: %v", err)
+			}
+			posted++
+		}
+		log.Printf("Done. Posted %d tweet(s)", posted)
+		return
+	}
+	log.Println("No token state found, checking env for bearer token...")
+
 	bearerToken := os.Getenv("TWITTER_BEARER_TOKEN")
 	if bearerToken != "" {
 		posted := 0
 		for _, e := range newEntries {
 			text := formatTweet(*template, e)
-			resp, err := postTweetOAuth2(bearerToken, text)
+			_, err := postTweetOAuth2(bearerToken, text)
 			if err != nil {
 				log.Printf("Failed to post tweet: %v", err)
 				break
 			}
-			log.Printf("Posted: %q (ID: %s)", resp.Data.Text, resp.Data.ID)
 			if err := writeLastTimestamp(*timestampFile, e.Published); err != nil {
 				log.Printf("Warning: could not save timestamp: %v", err)
 			}
@@ -211,12 +257,16 @@ func cmdGetToken(args []string) {
 
 	clientID := os.Getenv("TWITTER_CLIENT_ID")
 	clientSecret := os.Getenv("TWITTER_CLIENT_SECRET")
-	redirectURI := fmt.Sprintf("http://localhost:%d/callback", *port)
-
 	if clientID == "" || clientSecret == "" {
 		log.Fatal("Missing TWITTER_CLIENT_ID and/or TWITTER_CLIENT_SECRET in .env or environment")
 	}
 
+	if err := runGetToken(clientID, clientSecret, fmt.Sprintf("http://localhost:%d/callback", *port), *noBrowser, *port); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func runGetToken(clientID, clientSecret, redirectURI string, noBrowser bool, port int) error {
 	codeVerifier := randomBase64URL(32)
 	codeChallenge := sha256URL(codeVerifier)
 	state := randomBase64URL(16)
@@ -272,7 +322,7 @@ func cmdGetToken(args []string) {
 		}{code: code, state: recvState}
 	})
 
-	server := &http.Server{Addr: fmt.Sprintf(":%d", *port), Handler: mux}
+	server := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: mux}
 
 	go func() {
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
@@ -285,7 +335,7 @@ func cmdGetToken(args []string) {
 	log.Printf("Opening browser to authorize...")
 	log.Printf("URL: %s", authURL)
 
-	if !*noBrowser {
+	if !noBrowser {
 		openBrowser(authURL)
 	} else {
 		log.Println("Visit the URL above to authorize.")
@@ -295,12 +345,21 @@ func cmdGetToken(args []string) {
 	server.Close()
 
 	if result.err != nil {
-		log.Fatalf("Authorization failed: %v", result.err)
+		return fmt.Errorf("authorization failed: %w", result.err)
 	}
 
 	tokenResp, err := exchangeCode(clientID, clientSecret, result.code, codeVerifier, redirectURI)
 	if err != nil {
-		log.Fatalf("Failed to exchange code for token: %v", err)
+		return fmt.Errorf("token exchange failed: %w", err)
+	}
+
+	ts := tokenState{
+		AccessToken:  tokenResp.AccessToken,
+		RefreshToken: tokenResp.RefreshToken,
+		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+	}
+	if err := saveTokenState(ts); err != nil {
+		return fmt.Errorf("saving token: %w", err)
 	}
 
 	fmt.Println()
@@ -312,8 +371,8 @@ func cmdGetToken(args []string) {
 	fmt.Printf("Expires In:    %d seconds\n", tokenResp.ExpiresIn)
 	fmt.Printf("Scope:         %s\n", tokenResp.Scope)
 	fmt.Println()
-	fmt.Println("Add this to your .env file:")
-	fmt.Printf("  TWITTER_BEARER_TOKEN=%s\n", tokenResp.AccessToken)
+	fmt.Println("Token saved to .twitter_token.json — post command will auto-refresh when expired.")
+	return nil
 }
 
 func cmdServe(args []string) {
@@ -329,7 +388,11 @@ func cmdServe(args []string) {
 		log.Fatal("Missing TWITTER_CLIENT_ID, TWITTER_CLIENT_SECRET, or TWITTER_REDIRECT_URI in .env")
 	}
 
-	states := make(map[string]string) // state -> code_verifier
+	log.Fatal(runServe(clientID, clientSecret, redirectURI, *port))
+}
+
+func runServe(clientID, clientSecret, redirectURI string, port int) error {
+	states := make(map[string]string)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -384,9 +447,8 @@ func cmdServe(args []string) {
 		})
 	})
 
-	addr := fmt.Sprintf(":%d", *port)
-	log.Printf("Auth server listening on http://localhost%s", addr)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	addr := fmt.Sprintf(":%d", port)
+	return http.ListenAndServe(addr, mux)
 }
 
 type tokenResponse struct {
@@ -411,7 +473,7 @@ func exchangeCode(clientID, clientSecret, code, codeVerifier, redirectURI string
 	req.SetBasicAuth(clientID, clientSecret)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -427,6 +489,86 @@ func exchangeCode(clientID, clientSecret, code, codeVerifier, redirectURI string
 		return nil, err
 	}
 	return &tr, nil
+}
+
+func loadTokenState() (*tokenState, error) {
+	data, err := os.ReadFile(tokenStateFile)
+	if err != nil {
+		return nil, err
+	}
+	var ts tokenState
+	if err := json.Unmarshal(data, &ts); err != nil {
+		return nil, err
+	}
+	return &ts, nil
+}
+
+func saveTokenState(ts tokenState) error {
+	data, err := json.MarshalIndent(ts, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(tokenStateFile, data, 0600)
+}
+
+func ensureValidToken(ts *tokenState) (string, error) {
+	if time.Now().Before(ts.ExpiresAt.Add(-60 * time.Second)) {
+		return ts.AccessToken, nil
+	}
+	return refreshAccessToken(ts)
+}
+
+func refreshAccessToken(ts *tokenState) (string, error) {
+	clientID := os.Getenv("TWITTER_CLIENT_ID")
+	clientSecret := os.Getenv("TWITTER_CLIENT_SECRET")
+	if clientID == "" || clientSecret == "" {
+		return "", fmt.Errorf("TWITTER_CLIENT_ID and TWITTER_CLIENT_SECRET required for token refresh")
+	}
+
+	data := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {ts.RefreshToken},
+	}
+
+	req, err := http.NewRequest("POST", twitterTokenURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return "", err
+	}
+	req.SetBasicAuth(clientID, clientSecret)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("refresh failed (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var tr tokenResponse
+	if err := json.Unmarshal(body, &tr); err != nil {
+		return "", err
+	}
+
+	ts.AccessToken = tr.AccessToken
+	if tr.RefreshToken != "" {
+		ts.RefreshToken = tr.RefreshToken
+	}
+	ts.ExpiresAt = time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second)
+
+	if err := saveTokenState(*ts); err != nil {
+		log.Printf("Warning: could not save refreshed token: %v", err)
+	}
+
+	log.Println("Access token refreshed successfully")
+	return ts.AccessToken, nil
+}
+
+func isUnauthorized(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "status 401")
 }
 
 func randomBase64URL(n int) string {
@@ -510,7 +652,7 @@ func postTweetOAuth2(bearerToken, text string) (*tweetResponse, error) {
 	req.Header.Set("Authorization", "Bearer "+bearerToken)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("sending request: %w", err)
 	}
@@ -587,7 +729,7 @@ func postTweetOAuth1(consumerKey, consumerSecret, accessToken, accessTokenSecret
 	req.Header.Set("Authorization", authHeader)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("sending request: %w", err)
 	}
