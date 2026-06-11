@@ -180,6 +180,13 @@ func cmdPost(args []string) {
 					resp, postErr = postTweetOAuth2(bearerToken, text)
 				}
 				if postErr != nil {
+					if isDuplicateContent(postErr) {
+						log.Printf("Skipping duplicate: %q", text)
+						if err := writeLastTimestamp(*timestampFile, e.Published); err != nil {
+							log.Printf("Warning: could not save timestamp: %v", err)
+						}
+						continue
+					}
 					log.Printf("Failed to post tweet: %v", postErr)
 					break
 				}
@@ -206,6 +213,13 @@ func cmdPost(args []string) {
 			text := formatTweet(*template, e)
 			_, err := postTweetOAuth2(bearerToken, text)
 			if err != nil {
+				if isDuplicateContent(err) {
+					log.Printf("Skipping duplicate: %q", text)
+					if err := writeLastTimestamp(*timestampFile, e.Published); err != nil {
+						log.Printf("Warning: could not save timestamp: %v", err)
+					}
+					continue
+				}
 				log.Printf("Failed to post tweet: %v", err)
 				break
 			}
@@ -236,6 +250,13 @@ func cmdPost(args []string) {
 		text := formatTweet(*template, e)
 		resp, err := postTweetOAuth1(consumerKey, consumerSecret, accessToken, accessTokenSecret, text)
 		if err != nil {
+			if isDuplicateContent(err) {
+				log.Printf("Skipping duplicate: %q", text)
+				if err := writeLastTimestamp(*timestampFile, e.Published); err != nil {
+					log.Printf("Warning: could not save timestamp: %v", err)
+				}
+				continue
+			}
 			log.Printf("Failed to post tweet: %v", err)
 			log.Println("Stopping to preserve chronological order. Already posted items are tracked.")
 			break
@@ -315,7 +336,7 @@ func runGetToken(clientID, clientSecret, redirectURI string, noBrowser bool, por
 	codeChallenge := sha256URL(codeVerifier)
 	state := randomBase64URL(16)
 
-	authURL := fmt.Sprintf("%s?response_type=code&client_id=%s&redirect_uri=%s&scope=%s&state=%s&code_challenge=%s&code_challenge_method=S256",
+	authURL := fmt.Sprintf("%s?response_type=code&client_id=%s&redirect_uri=%s&scope=%s&state=%s&code_challenge=%s&code_challenge_method=S256&prompt=login",
 		twitterAuthURL,
 		clientID,
 		url.QueryEscape(redirectURI),
@@ -445,7 +466,7 @@ func runServe(clientID, clientSecret, redirectURI string, port int) error {
 		state := randomBase64URL(16)
 		states[state] = codeVerifier
 
-		authURL := fmt.Sprintf("%s?response_type=code&client_id=%s&redirect_uri=%s&scope=%s&state=%s&code_challenge=%s&code_challenge_method=S256",
+		authURL := fmt.Sprintf("%s?response_type=code&client_id=%s&redirect_uri=%s&scope=%s&state=%s&code_challenge=%s&code_challenge_method=S256&prompt=login",
 			twitterAuthURL,
 			clientID,
 			url.QueryEscape(redirectURI),
@@ -613,6 +634,10 @@ func refreshAccessToken(ts *tokenState) (string, error) {
 
 func isUnauthorized(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "status 401")
+}
+
+func isDuplicateContent(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "duplicate content")
 }
 
 func randomBase64URL(n int) string {
