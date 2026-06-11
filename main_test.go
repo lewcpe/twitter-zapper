@@ -629,7 +629,7 @@ func TestCmdPostWithTokenState(t *testing.T) {
 	ts := tokenState{AccessToken: "state-tok", RefreshToken: "rt", ExpiresAt: time.Now().Add(2 * time.Hour)}
 	saveTokenState(ts)
 
-	cmdPost([]string{"--feed-url", feedSrv.URL, "--timestamp-file", filepath.Join(tmpDir, "ts.txt")})
+	cmdPost([]string{"--feed-url", feedSrv.URL, "--timestamp-file", filepath.Join(tmpDir, "ts.txt"), "--token-file", filepath.Join(tmpDir, "token.json")})
 }
 
 func TestCmdPostAllOld(t *testing.T) {
@@ -925,5 +925,107 @@ func TestSaveTokenStateWriteError(t *testing.T) {
 	err := saveTokenState(ts)
 	if err == nil {
 		t.Error("expected error for invalid path")
+	}
+}
+
+func TestCmdPostMaxPostsDryRun(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, `<?xml version="1.0"?>
+<rss version="2.0"><channel>
+<item><title>A</title><link>https://x.com/a</link><pubDate>Mon, 01 Jan 2025 12:00:00 GMT</pubDate></item>
+<item><title>B</title><link>https://x.com/b</link><pubDate>Tue, 02 Jan 2025 12:00:00 GMT</pubDate></item>
+<item><title>C</title><link>https://x.com/c</link><pubDate>Wed, 03 Jan 2025 12:00:00 GMT</pubDate></item>
+</channel></rss>`)
+	}))
+	defer srv.Close()
+
+	cmdPost([]string{"--dry-run", "--feed-url", srv.URL, "--max-posts", "2"})
+}
+
+func TestCmdPostMaxPostsPosted(t *testing.T) {
+	feedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, `<?xml version="1.0"?>
+<rss version="2.0"><channel>
+<item><title>1st</title><link>https://x.com/1st</link><pubDate>Mon, 01 Jan 2025 12:00:00 GMT</pubDate></item>
+<item><title>2nd</title><link>https://x.com/2nd</link><pubDate>Tue, 02 Jan 2025 12:00:00 GMT</pubDate></item>
+<item><title>3rd</title><link>https://x.com/3rd</link><pubDate>Wed, 03 Jan 2025 12:00:00 GMT</pubDate></item>
+</channel></rss>`)
+	}))
+	defer feedSrv.Close()
+
+	tweetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(201)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]string{"id": "mp1", "text": "ok"},
+		})
+	}))
+	defer tweetSrv.Close()
+
+	origAPI := twitterAPIV2
+	twitterAPIV2 = tweetSrv.URL
+	defer func() { twitterAPIV2 = origAPI }()
+
+	tmpDir := t.TempDir()
+	tsFile := filepath.Join(tmpDir, "ts.txt")
+
+	os.Setenv("TWITTER_BEARER_TOKEN", "max-posts-token")
+	defer os.Unsetenv("TWITTER_BEARER_TOKEN")
+
+	origFile := tokenStateFile
+	tokenStateFile = filepath.Join(tmpDir, "nonexistent.json")
+	defer func() { tokenStateFile = origFile }()
+
+	cmdPost([]string{"--feed-url", feedSrv.URL, "--timestamp-file", tsFile, "--max-posts", "2"})
+
+	saved := readLastTimestamp(tsFile)
+	expected := time.Date(2025, 1, 2, 12, 0, 0, 0, time.UTC)
+	if !saved.Equal(expected) {
+		t.Errorf("timestamp = %v, want %v (should be 2nd item's date)", saved, expected)
+	}
+}
+
+func TestCmdPostMaxPostsRemaining(t *testing.T) {
+	feedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, `<?xml version="1.0"?>
+<rss version="2.0"><channel>
+<item><title>Old</title><link>https://x.com/old</link><pubDate>Mon, 01 Jan 2025 12:00:00 GMT</pubDate></item>
+<item><title>New</title><link>https://x.com/new</link><pubDate>Wed, 03 Jan 2025 12:00:00 GMT</pubDate></item>
+</channel></rss>`)
+	}))
+	defer feedSrv.Close()
+
+	tmpDir := t.TempDir()
+	tsFile := filepath.Join(tmpDir, "ts.txt")
+
+	writeLastTimestamp(tsFile, time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC))
+
+	os.Setenv("TWITTER_BEARER_TOKEN", "remaining-token")
+	defer os.Unsetenv("TWITTER_BEARER_TOKEN")
+
+	origFile := tokenStateFile
+	tokenStateFile = filepath.Join(tmpDir, "nonexistent.json")
+	defer func() { tokenStateFile = origFile }()
+
+	postCount := 0
+	tweetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		postCount++
+		w.WriteHeader(201)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]string{"id": fmt.Sprintf("rem%d", postCount), "text": "ok"},
+		})
+	}))
+	defer tweetSrv.Close()
+
+	origAPI := twitterAPIV2
+	twitterAPIV2 = tweetSrv.URL
+	defer func() { twitterAPIV2 = origAPI }()
+
+	cmdPost([]string{"--feed-url", feedSrv.URL, "--timestamp-file", tsFile, "--max-posts", "5"})
+
+	if postCount != 1 {
+		t.Errorf("posted %d items, want 1 (only 'New' is newer than timestamp)", postCount)
 	}
 }

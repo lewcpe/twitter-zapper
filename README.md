@@ -83,13 +83,20 @@ TWITTER_ACCESS_TOKEN_SECRET=...
 TWITTER_REDIRECT_URI=https://your-tunnel.trycloudflare.com/callback
 ```
 
-### 4. Post
+### 4. Build
 
 ```bash
-# Build
+# Local build
 go build -o twitter-poster .
 
-# Dry run (no credentials needed)
+# Cross-compile for macOS ARM64
+GOOS=darwin GOARCH=arm64 go build -o twitter-poster-darwin-arm64 .
+
+# Cross-compile for Linux x86_64
+GOOS=linux GOARCH=amd64 go build -o twitter-poster-linux-amd64 .
+```
+
+### 5. Post
 ./twitter-poster post --feed-url "https://your-feed-url" --dry-run
 
 # Post to Twitter

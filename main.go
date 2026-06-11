@@ -70,13 +70,35 @@ func main() {
 		case "post":
 			cmdPost(args[1:])
 			return
+		case "help", "-h", "--help":
+			printUsage()
+			return
 		default:
-			fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", args[0])
-			fmt.Fprintf(os.Stderr, "usage: twitter-poster [post|get-token|serve] [flags]\n")
+			fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n\n", args[0])
+			printUsage()
 			os.Exit(1)
 		}
 	}
+	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h") {
+		printUsage()
+		return
+	}
 	cmdPost(args)
+}
+
+func printUsage() {
+	fmt.Println(`twitter-poster — post new RSS/Atom feed items to Twitter
+
+Usage:
+  twitter-poster [command] [flags]
+
+Commands:
+  post        Fetch RSS/Atom feed and post new items (default)
+  get-token   OAuth 2.0 PKCE flow — obtain access token
+  serve       Persistent OAuth 2.0 auth server
+  help        Show this help
+
+Run 'twitter-poster <command> --help' for command-specific flags.`)
 }
 
 func cmdPost(args []string) {
@@ -84,8 +106,12 @@ func cmdPost(args []string) {
 	feedURL := fs.String("feed-url", "https://www.blognone.com/node/feed", "URL of RSS/Atom feed to fetch")
 	template := fs.String("template", "{title} {link}", "Tweet format. Available: {title}, {link}")
 	timestampFile := fs.String("timestamp-file", "last_timestamp.txt", "Path to last timestamp file")
+	tokenFile := fs.String("token-file", ".twitter_token.json", "Path to token state file")
 	dryRun := fs.Bool("dry-run", false, "Print what would be posted without actually posting")
+	maxPosts := fs.Int("max-posts", 0, "Max tweets to post per run (0 = unlimited)")
 	fs.Parse(args)
+
+	tokenStateFile = *tokenFile
 
 	log.Printf("Fetching feed: %s", *feedURL)
 
@@ -121,8 +147,14 @@ func cmdPost(args []string) {
 
 	if *dryRun {
 		log.Println("=== DRY RUN ===")
+		shown := 0
 		for _, e := range newEntries {
 			log.Printf("Would post: %q (published: %s)", formatTweet(*template, e), e.Published.Format(time.RFC3339))
+			shown++
+			if *maxPosts > 0 && shown >= *maxPosts {
+				log.Printf("(stopping at limit: %d of %d items)", *maxPosts, len(newEntries))
+				break
+			}
 		}
 		return
 	}
@@ -157,6 +189,10 @@ func cmdPost(args []string) {
 				log.Printf("Warning: could not save timestamp: %v", err)
 			}
 			posted++
+			if *maxPosts > 0 && posted >= *maxPosts {
+				log.Printf("Reached limit of %d posts, %d remaining for next run", *maxPosts, len(newEntries)-posted)
+				break
+			}
 		}
 		log.Printf("Done. Posted %d tweet(s)", posted)
 		return
@@ -177,6 +213,10 @@ func cmdPost(args []string) {
 				log.Printf("Warning: could not save timestamp: %v", err)
 			}
 			posted++
+			if *maxPosts > 0 && posted >= *maxPosts {
+				log.Printf("Reached limit of %d posts, %d remaining for next run", *maxPosts, len(newEntries)-posted)
+				break
+			}
 		}
 		log.Printf("Done. Posted %d tweet(s)", posted)
 		return
@@ -205,6 +245,10 @@ func cmdPost(args []string) {
 			log.Printf("Warning: could not save timestamp: %v", err)
 		}
 		posted++
+		if *maxPosts > 0 && posted >= *maxPosts {
+			log.Printf("Reached limit of %d posts, %d remaining for next run", *maxPosts, len(newEntries)-posted)
+			break
+		}
 	}
 	log.Printf("Done. Posted %d tweet(s)", posted)
 }

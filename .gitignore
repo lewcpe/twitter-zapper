@@ -1,3 +1,5 @@
 .env
 .twitter_token.json
+last_timestamp.txt
 twitter-poster
+twitter-poster-*
