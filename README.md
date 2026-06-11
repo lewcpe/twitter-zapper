@@ -1,74 +1,148 @@
-# Twitter Zapier Post
+# Twitter Feed Poster
 
-This repository contains tools to post tweets via the Twitter (X) API v2 using "Code by Zapier".
+Post new items from an RSS/Atom feed to Twitter (X) API v2. Written in Go.
 
-## 1. OAuth 2.0 Token Acquisition Tool (FastAPI)
+## Quick Start
 
-Since posting tweets requires **User Context**, you can use the included FastAPI server to perform the OAuth 2.0 PKCE flow and get a valid `access_token`.
+```bash
+# Get OAuth 2.0 access token (opens browser for authorization)
+./twitter-poster get-token
 
-### A. Setup Twitter Developer Portal
-1. Go to your App's **User authentication settings**.
-2. Enable **OAuth 2.0**.
-3. Set **App Type** to **Web App**.
-4. Set **Callback URI** to `https://<your-tunnel-subdomain>.trycloudflare.com/callback`.
-5. Copy your **Client ID** and **Client Secret**.
+# Preview what would be posted from a feed
+./twitter-poster post --feed-url "https://example.com/feed.xml" --dry-run
 
-### B. Run the Auth Server (using `uv`)
-1. Ensure you have [`uv`](https://github.com/astral-sh/uv) installed.
-2. Create your `.env` file:
-   ```bash
-   cp .env.example .env
-   ```
-3. Edit `.env` and fill in your `TWITTER_CLIENT_ID`, `TWITTER_CLIENT_SECRET`, and `TWITTER_REDIRECT_URI`.
-4. Run the server:
-   ```bash
-   uv run auth_server.py
-   ```
-5. Start a Cloudflare Tunnel (in another terminal):
-   ```bash
-   cloudflared tunnel --url http://localhost:8000
-   ```
-6. Visit the URL provided by Cloudflare. It will redirect you to Twitter to authorize.
-7. After authorization, the server will display your `access_token`.
+# Post new items to Twitter using default format: {title} {link}
+./twitter-poster post --feed-url "https://example.com/feed.xml"
 
----
+# Custom tweet format
+./twitter-poster post --feed-url "https://example.com/feed.xml" --template "[{title}] {link}"
+```
 
-## 2. Setup in Zapier
+## Setup
 
-### A. Set Up Your App Permissions
-1. Go to the [Twitter Developer Portal](https://developer.twitter.com/en/portal/dashboard).
-2. Select your Project and then your App.
-3. Click on the **Settings** (gear icon) for your app.
-4. Under **User authentication settings**, click **Edit**:
-   - Enable **OAuth 1.0a** (for permanent tokens) OR **OAuth 2.0** (for the FastAPI tool).
-   - Set **App permissions** to **Read and Write**.
-   - Under **Type of App**, select **Web App, Android, or iOS**.
-   - Set a **Callback URI / Redirect URL** (Must match your tunnel URL).
-   - Set a **Website URL** (e.g., your personal site).
-5. Click **Save**.
+### 1. Twitter Developer Portal
 
-### B. Configuration for "Code by Zapier"
-In your Zapier Code step, add the following keys to **Input Data**:
+1. Go to [Twitter Developer Portal](https://developer.twitter.com/en/portal/dashboard) → your App → Settings
+2. Under **User authentication settings**, enable **OAuth 2.0** (or OAuth 1.0a)
+3. Set App permissions to **Read and Write**
+4. Set App type to **Web App**
+5. Copy your **Client ID** and **Client Secret**
 
-#### For OAuth 1.0a (Permanent Token):
-| Key | Value |
-| :--- | :--- |
-| `consumer_key` | API Key |
-| `consumer_secret` | API Key Secret |
-| `access_token` | User Access Token |
-| `access_token_secret` | User Access Token Secret |
-| `tweet_text` | Tweet content |
+### 2. Get Access Token
 
-#### For OAuth 2.0 (Bearer Token from FastAPI Tool):
-| Key | Value |
-| :--- | :--- |
-| `bearer_token` | `access_token` from FastAPI |
-| `tweet_text` | Tweet content |
+**Option A: OAuth 2.0 PKCE (recommended)**
 
----
+```bash
+./twitter-poster get-token
+```
+
+Starts a local server on `:8080`, opens your browser to authorize with Twitter, and prints the token.
+
+> Ensure your Twitter app has `http://localhost:8080/callback` as a valid Callback URI.
+
+**Option B: OAuth 1.0a (from Developer Portal)**
+
+In the Developer Portal, under **Keys and tokens**, generate Access Token & Secret. Then set in `.env`:
+
+```
+TWITTER_CONSUMER_KEY=...
+TWITTER_CONSUMER_SECRET=...
+TWITTER_ACCESS_TOKEN=...
+TWITTER_ACCESS_TOKEN_SECRET=...
+```
+
+**Option C: Persistent auth server (for Cloudflare tunnel)**
+
+```bash
+./twitter-poster serve --port 8000
+# In another terminal:
+cloudflared tunnel --url http://localhost:8000
+```
+
+### 3. Configure `.env`
+
+```bash
+cp .env.example .env
+```
+
+Fill in the relevant credentials:
+
+```
+# OAuth 2.0 (from get-token or serve)
+TWITTER_CLIENT_ID=...
+TWITTER_CLIENT_SECRET=...
+TWITTER_BEARER_TOKEN=...        # paste access_token from get-token
+
+# OAuth 1.0a (from Developer Portal)
+TWITTER_CONSUMER_KEY=...
+TWITTER_CONSUMER_SECRET=...
+TWITTER_ACCESS_TOKEN=...
+TWITTER_ACCESS_TOKEN_SECRET=...
+
+# Optional: redirect URI for serve command
+TWITTER_REDIRECT_URI=https://your-tunnel.trycloudflare.com/callback
+```
+
+### 4. Post
+
+```bash
+# Build
+go build -o twitter-poster .
+
+# Dry run (no credentials needed)
+./twitter-poster post --feed-url "https://your-feed-url" --dry-run
+
+# Post to Twitter
+./twitter-poster post --feed-url "https://your-feed-url"
+```
+
+## How It Works
+
+- The program fetches an RSS or Atom feed from the given URL (format auto-detected)
+- Compares each item's publish date against the last posted timestamp in `last_timestamp.txt`
+- Only **newer** items are posted — no duplicates
+- The timestamp is saved **immediately** after each successful post, so interrupted runs won't re-post
+- If `TWITTER_BEARER_TOKEN` is set, OAuth 2.0 is used; otherwise OAuth 1.0a
+- Default tweet format is `{title} {link}`; customizable via `--template`
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `post` (default) | Fetch RSS/Atom feed and post new items to Twitter |
+| `get-token` | OAuth 2.0 PKCE flow — opens browser, obtains access token |
+| `serve` | Persistent OAuth 2.0 auth server (for Cloudflare tunnel setups) |
+
+### Post flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--feed-url` | `https://www.blognone.com/node/feed` | URL of RSS/Atom feed to fetch |
+| `--template` | `{title} {link}` | Tweet format. Placeholders: `{title}`, `{link}` |
+| `--timestamp-file` | `last_timestamp.txt` | Path to last timestamp file |
+| `--dry-run` | `false` | Print what would be posted without posting |
+
+### get-token flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--port` | `8080` | Local port for OAuth callback |
+| `--no-browser` | `false` | Don't open browser automatically |
+
+### serve flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--port` | `8000` | Server port |
 
 ## Troubleshooting
 
-- **403 Forbidden:** Ensure your App permissions are set to "Read and Write".
-- **401 Unauthorized:** Check that your tokens/keys are correct and the signature matches.
-- **Duplicate Tweet:** Twitter prevents posting the exact same text twice in a row.
+- **403 Forbidden:** App permissions must be "Read and Write"
+- **401 Unauthorized:** Check credentials in `.env`
+- **Duplicate Tweet:** Twitter rejects identical consecutive tweets; the timestamp tracking prevents this from the source side
+- **Callback error:** Ensure your Twitter app's Callback URI matches `http://localhost:{port}/callback` (for get-token) or your tunnel URL (for serve)
+- **Feed parse error:** Verify the feed URL is publicly accessible and returns valid RSS or Atom XML
+
+## Legacy
+
+The original Python/JavaScript implementations are in [`legacy/`](legacy/).
