@@ -33,7 +33,7 @@ var (
 )
 
 const (
-	twitterAuthURL = "https://twitter.com/i/oauth2/authorize"
+	twitterAuthURL = "https://x.com/i/oauth2/authorize"
 )
 
 type tweetResponse struct {
